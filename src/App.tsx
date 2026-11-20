@@ -80,6 +80,7 @@ function publicImageUrl(image: PropertyImage) {
 }
 
 function App() {
+  const isAdminRoute = window.location.pathname.replace(/\/+$/, '') === '/admin';
   const [properties, setProperties] = useState<Property[]>([]);
   const [sessionEmail, setSessionEmail] = useState<string | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
@@ -103,13 +104,24 @@ function App() {
 
   useEffect(() => {
     let active = true;
-    void apiRequest<{ email: string | null }>('/session')
-      .then(({ email }) => { if (active) setSessionEmail(email); })
+    void apiRequest<{ email: string | null; isAdmin: boolean }>('/session')
+      .then(({ email, isAdmin }) => {
+        if (!active) return;
+        setSessionEmail(email);
+        if (isAdminRoute && isAdmin) setManageOpen(true);
+        else if (isAdminRoute) setAuthOpen(true);
+      })
       .catch((error: unknown) => {
-        if (active) setNotice(error instanceof Error ? error.message : 'Could not load the current session.');
+        if (active) {
+          setNotice(error instanceof Error ? error.message : 'Could not load the current session.');
+          if (isAdminRoute) {
+            setAuthOpen(true);
+            setAuthMessage(error instanceof Error ? error.message : 'Could not load the current session.');
+          }
+        }
       });
     return () => { active = false; };
-  }, []);
+  }, [isAdminRoute]);
 
   useEffect(() => {
     void loadProperties();
@@ -140,14 +152,17 @@ function App() {
         setAuthMessage(result.error.message || 'We could not complete that request.');
         return;
       }
-      if (authMode === 'signup') {
-        setAuthMessage('Account created. Check your email to verify it, then sign in.');
-        setAuthMode('signin');
-        return;
-      }
       const session = await apiRequest<{ email: string | null; isAdmin: boolean }>('/session');
       if (!session.isAdmin) {
-        setAuthMessage('Administrator access is limited to the configured ADMIN_EMAIL.');
+        if (authMode === 'signup') {
+          await authClient.signOut();
+          setAuthMessage(import.meta.env.PROD
+            ? 'Account created. Verify your email before signing in with a configured administrator account.'
+            : 'Administrator access is limited to the addresses configured for this admin page.');
+          setAuthMode('signin');
+          return;
+        }
+        setAuthMessage('This account is not configured for administrator access.');
         return;
       }
       setSessionEmail(session.email);
@@ -168,15 +183,11 @@ function App() {
       setSessionEmail(null);
       setManageOpen(false);
       setSelectedPropertyId(null);
+      if (isAdminRoute) setAuthOpen(true);
       void loadProperties();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not sign out.');
     }
-  }
-
-  function openManager() {
-    if (sessionEmail) setManageOpen(true);
-    else setAuthOpen(true);
   }
 
   function openApplication(propertyId = '') {
@@ -314,7 +325,16 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={isAdminRoute ? 'app-shell admin-route' : 'app-shell'}>
+      {isAdminRoute && (
+        <header className="admin-route-header">
+          <a className="brand" href="/" aria-label="Masters Real Estate home">
+            <span className="brand-mark"><Building2 size={21} strokeWidth={1.5} /></span>
+            <span><strong>MASTERS</strong><small>ADMIN</small></span>
+          </a>
+          <a className="admin-back-link" href="/">Back to website</a>
+        </header>
+      )}
       <header className="site-header">
         <a className="brand" href="#top" aria-label="Masters Real Estate home">
           <span className="brand-mark"><Building2 size={21} strokeWidth={1.5} /></span>
@@ -326,7 +346,6 @@ function App() {
           <a href="#collection" onClick={() => setMobileNavOpen(false)}>Collection</a>
           <a href="#renter-application" onClick={() => { setMobileNavOpen(false); setApplicationPropertyId(''); }}>Apply to rent</a>
           <a href="#journal" onClick={() => setMobileNavOpen(false)}>Journal</a>
-          <button className="nav-manager" onClick={openManager}>{sessionEmail ? 'Manage listings' : 'Admin sign in'} <ArrowRight size={15} /></button>
         </nav>
       </header>
 
@@ -357,7 +376,7 @@ function App() {
 
         <section className="collection" id="collection">
           <div className="section-heading"><div><p className="eyebrow">The collection</p><h2>Verified listings, <span>when ready.</span></h2></div><p className="section-note">Actual listings appear here only after a signed-in administrator adds verified property details and photographs.</p></div>
-          {publishedProperties.length === 0 ? <div className="empty-collection"><div className="empty-icon"><FileImage size={27} /></div><div><h3>The collection is being composed.</h3><p>No verified properties are currently available to view. Illustrative photography elsewhere on this page is clearly marked and is not a listing.</p></div><button className="text-button" onClick={openManager}>For administrators <ArrowRight size={16} /></button></div> : <div className="property-grid">{publishedProperties.map((property) => <PropertyCard key={property.id} property={property} onApply={() => openApplication(property.id)} />)}</div>}
+          {publishedProperties.length === 0 ? <div className="empty-collection"><div className="empty-icon"><FileImage size={27} /></div><div><h3>The collection is being composed.</h3><p>No verified properties are currently available to view. Illustrative photography elsewhere on this page is clearly marked and is not a listing.</p></div><a className="text-button" href="#renter-application">Start a rental application <ArrowRight size={16} /></a></div> : <div className="property-grid">{publishedProperties.map((property) => <PropertyCard key={property.id} property={property} onApply={() => openApplication(property.id)} />)}</div>}
         </section>
 
         <RenterApplication
@@ -373,7 +392,7 @@ function App() {
       {notice && !manageOpen && <p className="notice" role="status"><ShieldCheck size={16} /> {notice}</p>}
       <footer className="site-footer"><div className="footer-brand"><span className="brand-mark"><Building2 size={20} strokeWidth={1.5} /></span><strong>MASTERS</strong></div><p>Independent real estate, thoughtfully presented.</p><span className="footer-line" /></footer>
 
-      {authOpen && <div className="overlay" role="dialog" aria-modal="true"><div className="auth-card"><button className="close-button" onClick={() => setAuthOpen(false)} aria-label="Close"><X size={20} /></button><div className="auth-symbol"><LockKeyhole size={21} /></div><p className="eyebrow">Private workspace</p><h2>{authMode === 'signin' ? 'Welcome back.' : 'Create access.'}</h2><p className="auth-description">Sign in to add verified property details and manage listing photography.</p><form onSubmit={handleAuth}><label>Email address<input type="email" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} required /></label><label>Password<input type="password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} minLength={6} required /></label><button className="button button-dark full-width" disabled={authLoading}>{authLoading ? 'Please wait…' : authMode === 'signin' ? 'Sign in' : 'Create account'} <ArrowRight size={16} /></button></form>{authMessage && <p className="form-message">{authMessage}</p>}<button className="switch-auth" onClick={() => { setAuthMode(authMode === 'signin' ? 'signup' : 'signin'); setAuthMessage(''); }}>{authMode === 'signin' ? 'Need an account? Create one' : 'Already have access? Sign in'}</button></div></div>}
+      {authOpen && <div className="overlay" role="dialog" aria-modal="true"><div className="auth-card"><button className="close-button" onClick={() => { setAuthOpen(false); if (isAdminRoute) window.location.assign('/'); }} aria-label="Close"><X size={20} /></button><div className="auth-symbol"><LockKeyhole size={21} /></div><p className="eyebrow">Private workspace</p><h2>{authMode === 'signin' ? 'Administrator sign in.' : 'Create administrator access.'}</h2><p className="auth-description">Only configured administrator email addresses can access applications and manage listings.</p><form onSubmit={handleAuth}><label>Email address<input type="email" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} required /></label><label>Password<input type="password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} minLength={8} required /></label><button className="button button-dark full-width" disabled={authLoading}>{authLoading ? 'Please wait…' : authMode === 'signin' ? 'Sign in' : 'Create account'} <ArrowRight size={16} /></button></form>{authMessage && <p className="form-message">{authMessage}</p>}<button className="switch-auth" onClick={() => { setAuthMode(authMode === 'signin' ? 'signup' : 'signin'); setAuthMessage(''); }}>{authMode === 'signin' ? 'Need an account? Create one' : 'Already have access? Sign in'}</button></div></div>}
 
       {manageOpen && (
         <div className="overlay manager-overlay" role="dialog" aria-modal="true">
@@ -386,7 +405,7 @@ function App() {
               </div>
               <div className="manager-actions">
                 <button className="icon-text-button" onClick={signOut}><LogOut size={16} /> Sign out</button>
-                <button className="close-button" onClick={() => setManageOpen(false)} aria-label="Close"><X size={20} /></button>
+                <button className="close-button" onClick={() => { setManageOpen(false); if (isAdminRoute) window.location.assign('/'); }} aria-label="Close"><X size={20} /></button>
               </div>
               <div className="admin-tabs">
                 <button className={adminTab === 'listings' ? 'admin-tab is-active' : 'admin-tab'} onClick={() => setAdminTab('listings')}><Building2 size={14} /> Listings</button>

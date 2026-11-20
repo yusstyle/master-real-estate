@@ -199,6 +199,11 @@ input:focus, select:focus { border-color: var(--gold); }
 .rental-admin-amenities { grid-column: 1 / -1; }
 .rental-admin-empty { align-items: center; color: var(--muted); display: flex; gap: 10px; justify-content: center; min-height: 220px; padding: 25px; text-align: center; }
 .rental-admin-empty p { font-size: 13px; margin: 0; }
+.admin-route { background: var(--navy); min-height: 100vh; }
+.admin-route > .site-header, .admin-route > main, .admin-route > .notice, .admin-route > .site-footer, .admin-route > .chat-fab, .admin-route > .chat-window { display: none !important; }
+.admin-route-header { align-items: center; background: var(--navy); color: #fff; display: flex; height: 82px; justify-content: space-between; padding: 0 clamp(24px, 6vw, 96px); }
+.admin-back-link { color: #cbd4dd; font-size: 12px; }
+.admin-back-link:hover { color: #fff; }
 @media (max-width: 650px) {
   .rental-application { padding-bottom: 75px; padding-top: 75px; }
   .application-grid, .application-options-grid { grid-template-columns: 1fr; }

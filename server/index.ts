@@ -11,7 +11,12 @@ const port = Number(process.env.PORT ?? 3000);
 const databaseUrl = process.env.DATABASE_URL;
 const authSecret = process.env.BETTER_AUTH_SECRET;
 const appUrl = process.env.BETTER_AUTH_URL ?? 'http://localhost:5173';
-const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+const adminEmails = new Set(
+  (process.env.ADMIN_EMAILS ?? process.env.ADMIN_EMAIL ?? '')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean),
+);
 const cloudinaryConfigured = Boolean(
   process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET,
 );
@@ -24,8 +29,13 @@ function createAuth(pool: Pool, secret: string) {
     trustedOrigins: process.env.NODE_ENV === 'production'
       ? [appUrl]
       : [appUrl, 'http://localhost:5173', 'http://127.0.0.1:5173'],
-    emailAndPassword: { enabled: true, requireEmailVerification: true, minPasswordLength: 6 },
+    emailAndPassword: {
+      enabled: true,
+      requireEmailVerification: process.env.NODE_ENV === 'production',
+      minPasswordLength: 8,
+    },
     emailVerification: {
+      sendOnSignUp: process.env.NODE_ENV === 'production',
       sendVerificationEmail: async ({ user, url }) => {
         const sent = await deliverEmail(
           user.email,
@@ -42,6 +52,10 @@ type AppAuth = ReturnType<typeof createAuth>;
 
 function jsonError(res: Response, status: number, error: string) {
   res.status(status).json({ error });
+}
+
+function isAdminEmail(email: string) {
+  return adminEmails.has(email.trim().toLowerCase());
 }
 
 function escapeHtml(value: string) {
@@ -87,7 +101,7 @@ function getAdmin(auth: AppAuth) {
       jsonError(res, 401, 'Please sign in to continue.');
       return null;
     }
-    if (!adminEmail || result.user.email.toLowerCase() !== adminEmail) {
+    if (!isAdminEmail(result.user.email)) {
       jsonError(res, 403, 'This account does not have administrator access.');
       return null;
     }
@@ -105,13 +119,13 @@ function registerApi(pool: Pool, auth: AppAuth) {
   app.get('/api/session', async (req, res) => {
     const result = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
     const email = result?.user.email ?? null;
-    const isAdmin = Boolean(email && adminEmail && email.toLowerCase() === adminEmail);
+    const isAdmin = Boolean(email && isAdminEmail(email));
     res.json({ email: isAdmin ? email : null, isAdmin });
   });
 
   app.get('/api/properties', async (req, res) => {
     const result = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
-    const ownerId = result && adminEmail && result.user.email.toLowerCase() === adminEmail ? result.user.id : null;
+    const ownerId = result && isAdminEmail(result.user.email) ? result.user.id : null;
     const { rows } = await query(
     `SELECT p.id, p.owner_id, p.title, p.address, p.price, p.availability, p.property_type,
       p.bedrooms, p.bathrooms::float8 AS bathrooms, p.area_sq_ft, p.is_published, p.created_at, p.updated_at,
