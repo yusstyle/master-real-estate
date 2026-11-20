@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { betterAuth } from 'better-auth';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
@@ -20,6 +20,9 @@ const adminEmails = new Set(
 const cloudinaryConfigured = Boolean(
   process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET,
 );
+
+const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
+const feePerAdultUsd = Number(process.env.APPLICATION_FEE_USD ?? 80);
 
 function createAuth(pool: Pool, secret: string) {
   return betterAuth({
@@ -114,7 +117,10 @@ function registerApi(pool: Pool, auth: AppAuth) {
   const query = (text: string, values: unknown[] = []) => pool.query(text, values);
 
   app.use('/api/auth', toNodeHandler(auth));
-  app.use(express.json({ limit: '1mb' }));
+  app.use(express.json({
+    limit: '1mb',
+    verify: (req, _res, buf) => { (req as Request & { rawBody?: Buffer }).rawBody = buf; },
+  }));
 
   app.get('/api/session', async (req, res) => {
     const result = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
@@ -186,6 +192,55 @@ function registerApi(pool: Pool, auth: AppAuth) {
     res.status(201).json({ ...rows[0], bathrooms: Number(rows[0].bathrooms), property_images: [] });
   });
 
+  async function verifyPaystackPayment(reference: string) {
+    if (!paystackSecret) return false;
+    const response = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
+      headers: { Authorization: `Bearer ${paystackSecret}` },
+    });
+    if (!response.ok) return false;
+    const payload = await response.json() as { data?: { status?: string; amount?: number; currency?: string } };
+    const data = payload.data;
+    if (!data || data.status !== 'success' || data.currency !== 'USD') return false;
+    const { rowCount } = await query(
+      `UPDATE rental_applications SET payment_status = 'paid', paid_at = now(), updated_at = now()
+       WHERE payment_reference = $1 AND fee_amount_cents = $2 AND payment_status <> 'paid'`,
+      [reference, data.amount],
+    );
+    if (rowCount) return true;
+    const { rows } = await query(
+      "SELECT 1 FROM rental_applications WHERE payment_reference = $1 AND payment_status = 'paid'",
+      [reference],
+    );
+    return rows.length > 0;
+  }
+
+  app.get('/api/application-fee', (_req, res) => {
+    res.json({ enabled: Boolean(paystackSecret), amount_per_adult: feePerAdultUsd, currency: 'USD' });
+  });
+
+  app.get('/api/payments/callback', async (req, res) => {
+    const reference = typeof req.query.reference === 'string'
+      ? req.query.reference
+      : typeof req.query.trxref === 'string' ? req.query.trxref : '';
+    const paid = reference ? await verifyPaystackPayment(reference) : false;
+    res.redirect(`${appUrl.replace(/\/$/, '')}/?payment=${paid ? 'success' : 'failed'}#renter-application`);
+  });
+
+  app.post('/api/payments/webhook', async (req, res) => {
+    const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
+    const signature = req.header('x-paystack-signature');
+    if (!paystackSecret || !rawBody || !signature) return jsonError(res, 401, 'Invalid signature.');
+    const expected = Buffer.from(createHmac('sha512', paystackSecret).update(rawBody).digest('hex'));
+    const received = Buffer.from(signature);
+    if (expected.length !== received.length || !timingSafeEqual(expected, received)) {
+      return jsonError(res, 401, 'Invalid signature.');
+    }
+    if (req.body?.event === 'charge.success' && typeof req.body?.data?.reference === 'string') {
+      await verifyPaystackPayment(req.body.data.reference);
+    }
+    res.sendStatus(200);
+  });
+
   app.post('/api/rental-applications', async (req, res) => {
     const body = req.body ?? {};
     const name = typeof body.applicant_name === 'string' ? body.applicant_name.trim() : '';
@@ -199,6 +254,7 @@ function registerApi(pool: Pool, auth: AppAuth) {
     const hasPets = body.has_pets;
     const firstTimeRenter = body.first_time_renter;
     const propertyId = body.property_id || null;
+    const adults = body.adults === undefined ? 1 : body.adults;
     const allowedEmployment = ['Employed', 'Unemployed', 'Self-employed', 'Student', 'Retired'];
     const allowedMoveDates = ['Immediately', 'Within a month', 'In 3 months', 'Other'];
     const allowedAmenities = [
@@ -221,6 +277,7 @@ function registerApi(pool: Pool, auth: AppAuth) {
     if (!Array.isArray(amenities) || amenities.some((value: unknown) => typeof value !== 'string' || !allowedAmenities.includes(value))) {
       return jsonError(res, 400, 'Select valid amenities.');
     }
+    if (!Number.isInteger(adults) || adults < 1 || adults > 6) return jsonError(res, 400, 'Select the number of adults (1 to 6).');
     if (typeof hasPets !== 'boolean' || typeof firstTimeRenter !== 'boolean') return jsonError(res, 400, 'Answer the pet and first-rental questions.');
     if (typeof body.privacy_consent !== 'boolean' || !body.privacy_consent) return jsonError(res, 400, 'Consent is required to submit this application.');
     if (income !== null && (!Number.isFinite(income) || income < 0 || income > 100000000)) {
@@ -233,6 +290,9 @@ function registerApi(pool: Pool, auth: AppAuth) {
       return jsonError(res, 400, 'Select a valid property.');
     }
 
+    const feeCents = paystackSecret ? Math.round(feePerAdultUsd * 100 * adults) : null;
+    const paymentReference = paystackSecret ? `MRE-${randomUUID()}` : null;
+    let applicationId = '';
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -249,9 +309,10 @@ function registerApi(pool: Pool, auth: AppAuth) {
       const { rows } = await client.query(
         `INSERT INTO rental_applications (
           property_id, applicant_name, phone, email, employment_status, monthly_gross_income,
-          move_date, current_address, amenities, has_pets, first_time_renter, privacy_consent
+          move_date, current_address, amenities, has_pets, first_time_renter, privacy_consent,
+          adults, fee_amount_cents, payment_reference
         )
-        SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true
+        SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true, $12::int, $13::int, $14::text
         WHERE $1::uuid IS NULL OR EXISTS (SELECT 1 FROM properties WHERE id = $1::uuid AND is_published = true)
         RETURNING id`,
         [
@@ -266,6 +327,9 @@ function registerApi(pool: Pool, auth: AppAuth) {
           amenities,
           hasPets,
           firstTimeRenter,
+          adults,
+          feeCents,
+          paymentReference,
         ],
       );
       if (!rows[0]) {
@@ -273,13 +337,40 @@ function registerApi(pool: Pool, auth: AppAuth) {
         return jsonError(res, 400, 'The selected property is no longer available.');
       }
       await client.query('COMMIT');
-      res.status(201).json({ id: rows[0].id });
+      applicationId = rows[0].id;
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
     } finally {
       client.release();
     }
+
+    let paymentUrl: string | null = null;
+    if (paymentReference && feeCents) {
+      try {
+        const response = await fetch('https://api.paystack.co/transaction/initialize', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${paystackSecret}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email,
+            amount: feeCents,
+            currency: 'USD',
+            reference: paymentReference,
+            callback_url: `${appUrl.replace(/\/$/, '')}/api/payments/callback`,
+            metadata: { application_id: applicationId, adults },
+          }),
+        });
+        const payload = await response.json() as { status?: boolean; message?: string; data?: { authorization_url?: string } };
+        if (response.ok && payload.status && payload.data?.authorization_url) {
+          paymentUrl = payload.data.authorization_url;
+        } else {
+          console.error('Paystack initialize failed:', response.status, payload.message);
+        }
+      } catch (error) {
+        console.error('Paystack initialize request failed:', error);
+      }
+    }
+    res.status(201).json({ id: applicationId, payment_required: Boolean(paymentReference), payment_url: paymentUrl });
   });
 
   app.get('/api/admin/rental-applications', async (req, res) => {
@@ -287,7 +378,8 @@ function registerApi(pool: Pool, auth: AppAuth) {
     const { rows } = await query(
       `SELECT a.id, a.applicant_name, a.phone, a.email, a.employment_status, a.monthly_gross_income,
         a.move_date, a.current_address, a.amenities, a.has_pets, a.first_time_renter,
-        a.status, a.created_at, p.title AS property_title
+        a.status, a.created_at, p.title AS property_title,
+        a.adults, a.fee_amount_cents, a.payment_status, a.payment_reference, a.paid_at
       FROM rental_applications a
       LEFT JOIN properties p ON p.id = a.property_id
       ORDER BY a.created_at DESC`,

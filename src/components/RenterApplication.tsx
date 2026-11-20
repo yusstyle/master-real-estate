@@ -1,4 +1,4 @@
-import { FormEvent, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 import { ArrowRight, Check, Loader2, ShieldCheck } from 'lucide-react';
 import { apiRequest } from '@/lib/api';
 
@@ -20,6 +20,7 @@ type ApplicationFields = {
   has_pets: string;
   first_time_renter: string;
   property_id: string;
+  adults: string;
   privacy_consent: boolean;
 };
 
@@ -35,6 +36,7 @@ const initialFields: ApplicationFields = {
   has_pets: '',
   first_time_renter: '',
   property_id: '',
+  adults: '1',
   privacy_consent: false,
 };
 
@@ -63,6 +65,20 @@ export default function RenterApplication({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const [submitted, setSubmitted] = useState(false);
+  const [paymentNotice, setPaymentNotice] = useState('');
+  const [fee, setFee] = useState<{ enabled: boolean; amount_per_adult: number } | null>(null);
+  const returnedPayment = new URLSearchParams(window.location.search).get('payment');
+
+  useEffect(() => {
+    let active = true;
+    void apiRequest<{ enabled: boolean; amount_per_adult: number }>('/application-fee')
+      .then((data) => { if (active) setFee(data); })
+      .catch(() => { /* fee info is optional */ });
+    return () => { active = false; };
+  }, []);
+
+  const adultsCount = Number(fields.adults);
+  const feeTotal = fee?.enabled ? fee.amount_per_adult * adultsCount : 0;
 
   function toggleAmenity(amenity: string) {
     setFields((current) => ({
@@ -78,13 +94,21 @@ export default function RenterApplication({
     setSending(true);
     setError('');
     try {
-      await apiRequest<{ id: string }>('/rental-applications', {
+      const result = await apiRequest<{ id: string; payment_required: boolean; payment_url: string | null }>('/rental-applications', {
         method: 'POST',
         body: JSON.stringify({
           ...fields,
+          adults: Number(fields.adults),
           monthly_gross_income: fields.monthly_gross_income === '' ? null : Number(fields.monthly_gross_income),
         }),
       });
+      if (result.payment_url) {
+        window.location.assign(result.payment_url);
+        return;
+      }
+      if (result.payment_required) {
+        setPaymentNotice('Your application was saved, but we could not start the payment page. We will contact you with a payment link.');
+      }
       setSubmitted(true);
       setFields({ ...initialFields, property_id: fields.property_id });
     } catch (submitError) {
@@ -101,12 +125,21 @@ export default function RenterApplication({
         <h2>Renter <span>application.</span></h2>
         <p>Tell us a little about your rental needs. An administrator will review your submission and follow up with you.</p>
       </div>
-      {submitted ? (
+      {returnedPayment === 'success' ? (
+        <div className="application-success" role="status">
+          <Check size={24} />
+          <div>
+            <h3>Application and fee received.</h3>
+            <p>Thank you. Your payment was confirmed and your application is now with our team. We will contact you using the details you provided.</p>
+          </div>
+        </div>
+      ) : submitted ? (
         <div className="application-success" role="status">
           <Check size={24} />
           <div>
             <h3>Application received.</h3>
             <p>Thank you. Your information has been submitted for review. We will contact you using the details you provided.</p>
+            {paymentNotice && <p>{paymentNotice}</p>}
           </div>
         </div>
       ) : (
@@ -138,6 +171,11 @@ export default function RenterApplication({
                   {properties.map((property) => (
                     <option key={property.id} value={property.id}>{property.title} — {property.address}</option>
                   ))}
+                </select>
+              </label>
+              <label>Number of adults applying
+                <select name="adults" value={fields.adults} onChange={(event) => setFields({ ...fields, adults: event.target.value })}>
+                  {[1, 2, 3, 4, 5, 6].map((count) => <option key={count} value={count}>{count}</option>)}
                 </select>
               </label>
               <label>Preferred move-in timing
@@ -202,17 +240,22 @@ export default function RenterApplication({
 
           <div className="application-privacy">
             <ShieldCheck size={19} />
-            <p>We use this information to respond to your rental enquiry. Do not include Social Security numbers, payment details, passwords, or other sensitive financial information.</p>
+            <p>We use this information to respond to your rental enquiry. Do not include Social Security numbers, card details, passwords, or other sensitive financial information here. Any payment happens on Paystack’s secure page.</p>
           </div>
           <label className="application-consent">
             <input type="checkbox" checked={fields.privacy_consent} onChange={(event) => setFields({ ...fields, privacy_consent: event.target.checked })} required />
             I agree that Masters Real Estate may use the information above to review and respond to this rental enquiry.
           </label>
+          {returnedPayment === 'failed' && <p className="application-error" role="alert">We could not confirm your payment. If you were charged, contact us and quote your email address.</p>}
           {error && <p className="application-error" role="alert">{error}</p>}
           <button className="button button-dark application-submit" type="submit" disabled={sending}>
-            {sending ? <><Loader2 size={17} className="chat-spin" /> Submitting…</> : <>Submit application <ArrowRight size={17} /></>}
+            {sending ? <><Loader2 size={17} className="chat-spin" /> Submitting…</> : <>{feeTotal ? `Submit and pay $${feeTotal.toFixed(2)}` : 'Submit application'} <ArrowRight size={17} /></>}
           </button>
-          <p className="application-fee-note">This form does not collect application fees or payment information.</p>
+          <p className="application-fee-note">
+            {fee?.enabled
+              ? `Application fee: $${fee.amount_per_adult.toFixed(2)} USD per adult ($${feeTotal.toFixed(2)} for ${adultsCount}). You will pay by card on Paystack’s secure page right after you submit; this site never sees your card details. The fee is refundable on request: refunds are reviewed by our team and returned to the original payment method.`
+              : 'No application fee is collected through this form.'}
+          </p>
         </form>
       )}
     </section>

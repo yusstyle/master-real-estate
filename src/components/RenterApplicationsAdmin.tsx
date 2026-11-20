@@ -17,6 +17,11 @@ type RentalApplication = {
   status: 'new' | 'reviewing' | 'closed';
   created_at: string;
   property_title: string | null;
+  adults: number;
+  fee_amount_cents: number | null;
+  payment_status: 'unpaid' | 'paid';
+  payment_reference: string | null;
+  paid_at: string | null;
 };
 
 function applicationDate(iso: string) {
@@ -84,6 +89,8 @@ export default function RenterApplicationsAdmin() {
             <div><dt>Employment</dt><dd>{application.employment_status}</dd></div>
             <div><dt>Monthly gross income</dt><dd>{application.monthly_gross_income === null ? 'Not provided' : Number(application.monthly_gross_income).toLocaleString('en-US', { style: 'currency', currency: 'USD' })}</dd></div>
             <div><dt>Move-in timing</dt><dd>{application.move_date}</dd></div>
+            <div><dt>Adults</dt><dd>{application.adults}</dd></div>
+            <div><dt>Application fee</dt><dd>{application.fee_amount_cents === null ? 'Not requested' : `${(application.fee_amount_cents / 100).toLocaleString('en-US', { style: 'currency', currency: 'USD' })} — ${application.payment_status === 'paid' ? `Paid ${application.paid_at ? applicationDate(application.paid_at) : ''}` : 'Unpaid'}${application.payment_reference ? ` (${application.payment_reference})` : ''}`}</dd></div>
             <div><dt>Pets</dt><dd>{application.has_pets ? 'Yes' : 'No'}</dd></div>
             <div><dt>First rental application</dt><dd>{application.first_time_renter ? 'Yes' : 'No'}</dd></div>
             <div className="rental-admin-amenities"><dt>Interested amenities</dt><dd>{application.amenities.length ? application.amenities.join(', ') : 'None selected'}</dd></div>

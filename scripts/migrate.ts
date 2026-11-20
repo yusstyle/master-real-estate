@@ -11,7 +11,7 @@ if (!connectionString) {
 const pool = new Pool({ connectionString });
 
 try {
-  for (const migrationName of ['001_initial_schema.sql', '002_renter_applications.sql']) {
+  for (const migrationName of ['001_initial_schema.sql', '002_renter_applications.sql', '003_application_fee.sql']) {
     const migrationPath = fileURLToPath(new URL(`../database/migrations/${migrationName}`, import.meta.url));
     const migration = await readFile(migrationPath, 'utf8');
     await pool.query(migration);
