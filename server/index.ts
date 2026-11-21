@@ -25,6 +25,7 @@ const cloudinaryConfigured = Boolean(
 
 const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
 const feePerAdultUsd = Number(process.env.APPLICATION_FEE_USD ?? 80);
+const extraOrigins = (process.env.EXTRA_TRUSTED_ORIGINS ?? '').split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean);
 
 function createAuth(pool: Pool, secret: string) {
   return betterAuth({
@@ -32,7 +33,7 @@ function createAuth(pool: Pool, secret: string) {
     baseURL: `${appUrl.replace(/\/$/, '')}/api/auth`,
     secret,
     trustedOrigins: process.env.NODE_ENV === 'production'
-      ? [appUrl]
+      ? [appUrl, ...extraOrigins]
       : [appUrl, 'http://localhost:5173', 'http://127.0.0.1:5173'],
     emailAndPassword: {
       enabled: true,
