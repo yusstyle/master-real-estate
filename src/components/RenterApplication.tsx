@@ -99,6 +99,8 @@ export default function RenterApplication({
         body: JSON.stringify({
           ...fields,
           adults: Number(fields.adults),
+          has_pets: fields.has_pets === 'yes',
+          first_time_renter: fields.first_time_renter === 'yes',
           monthly_gross_income: fields.monthly_gross_income === '' ? null : Number(fields.monthly_gross_income),
         }),
       });
