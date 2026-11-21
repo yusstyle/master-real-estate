@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import path from 'node:path';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { betterAuth } from 'better-auth';
@@ -7,6 +8,7 @@ import { v2 as cloudinary } from 'cloudinary';
 import { Pool, type PoolClient } from 'pg';
 
 const app = express();
+app.set('trust proxy', 1);
 const port = Number(process.env.PORT ?? 3000);
 const databaseUrl = process.env.DATABASE_URL;
 const authSecret = process.env.BETTER_AUTH_SECRET;
@@ -727,6 +729,17 @@ if (!databaseUrl || !authSecret) {
   registerApi(pool, auth);
 }
 
+if (process.env.NODE_ENV === 'production') {
+  const distDir = path.resolve(process.cwd(), 'dist');
+  app.use(express.static(distDir));
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' || req.path.startsWith('/api')) {
+      next();
+      return;
+    }
+    res.sendFile(path.join(distDir, 'index.html'));
+  });
+}
 app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
   console.error('API request failed:', error);
   if (res.headersSent) {
