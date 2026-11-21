@@ -713,6 +713,8 @@ if (!databaseUrl || !authSecret) {
   app.use('/api', (_req, res) => jsonError(res, 503, 'Configure DATABASE_URL and BETTER_AUTH_SECRET to enable the backend.'));
 } else {
   const pool = new Pool({ connectionString: databaseUrl });
+  pool.on('error', (error) => console.error('Database pool error:', error.message));
+  pool.on('connect', (client) => client.on('error', (error) => console.error('Database client error:', error.message)));
   const auth = createAuth(pool, authSecret);
   if (cloudinaryConfigured) {
     cloudinary.config({
