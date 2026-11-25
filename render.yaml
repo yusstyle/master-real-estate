@@ -34,3 +34,11 @@ services:
         sync: false
       - key: RESEND_FROM_EMAIL
         sync: false
+      - key: MANUAL_PAYMENT_ACCOUNT_NUMBER
+        sync: false
+      - key: MANUAL_PAYMENT_ACCOUNT_NAME
+        sync: false
+      - key: MANUAL_PAYMENT_BANK_NAME
+        sync: false
+      - key: MANUAL_PAYMENT_INSTRUCTIONS
+        sync: false

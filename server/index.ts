@@ -25,6 +25,16 @@ const cloudinaryConfigured = Boolean(
 
 const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
 const feePerAdultUsd = Number(process.env.APPLICATION_FEE_USD ?? 80);
+// Manual bank transfer: set MANUAL_PAYMENT_ACCOUNT_NUMBER to turn it on. It takes priority over Paystack.
+const manualPayment = process.env.MANUAL_PAYMENT_ACCOUNT_NUMBER?.trim()
+  ? {
+      account_number: process.env.MANUAL_PAYMENT_ACCOUNT_NUMBER.trim(),
+      account_name: process.env.MANUAL_PAYMENT_ACCOUNT_NAME?.trim() ?? '',
+      bank_name: process.env.MANUAL_PAYMENT_BANK_NAME?.trim() ?? '',
+      instructions: process.env.MANUAL_PAYMENT_INSTRUCTIONS?.trim() ?? '',
+    }
+  : null;
+const feeEnabled = Boolean(manualPayment || process.env.PAYSTACK_SECRET_KEY);
 const extraOrigins = (process.env.EXTRA_TRUSTED_ORIGINS ?? '').split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean);
 
 function createAuth(pool: Pool, secret: string) {
@@ -218,7 +228,39 @@ function registerApi(pool: Pool, auth: AppAuth) {
   }
 
   app.get('/api/application-fee', (_req, res) => {
-    res.json({ enabled: Boolean(paystackSecret), amount_per_adult: feePerAdultUsd, currency: 'USD' });
+    res.json({
+      enabled: feeEnabled,
+      method: manualPayment ? 'manual' : paystackSecret ? 'paystack' : null,
+      amount_per_adult: feePerAdultUsd,
+      currency: 'USD',
+    });
+  });
+
+  // Applicant says they have made the bank transfer. This only flags it as "pending";
+  // an administrator confirms it against the bank account before it counts as paid.
+  app.post('/api/rental-applications/:id/payment-claim', async (req, res) => {
+    if (!manualPayment) return jsonError(res, 404, 'Manual payments are not enabled.');
+    const reference = typeof req.body?.payment_reference === 'string' ? req.body.payment_reference.trim() : '';
+    const payerName = typeof req.body?.payer_name === 'string' ? req.body.payer_name.trim() : '';
+    if (!reference) return jsonError(res, 400, 'A payment reference is required.');
+    if (payerName.length > 120) return jsonError(res, 400, 'Enter a sender name under 120 characters.');
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.id)) {
+      return jsonError(res, 404, 'Application not found.');
+    }
+    const { rowCount } = await query(
+      `UPDATE rental_applications
+       SET payment_status = 'pending', payment_method = 'manual', payment_claimed_at = now(),
+           payer_name = $3, updated_at = now()
+       WHERE id = $1 AND payment_reference = $2 AND payment_status IN ('unpaid', 'pending')`,
+      [req.params.id, reference, payerName || null],
+    );
+    if (rowCount) return res.json({ success: true });
+    const { rows } = await query(
+      'SELECT payment_status FROM rental_applications WHERE id = $1 AND payment_reference = $2',
+      [req.params.id, reference],
+    );
+    if (rows[0]?.payment_status === 'paid') return res.json({ success: true });
+    return jsonError(res, 404, 'Application not found.');
   });
 
   app.get('/api/payments/callback', async (req, res) => {
@@ -293,8 +335,13 @@ function registerApi(pool: Pool, auth: AppAuth) {
       return jsonError(res, 400, 'Select a valid property.');
     }
 
-    const feeCents = paystackSecret ? Math.round(feePerAdultUsd * 100 * adults) : null;
-    const paymentReference = paystackSecret ? `MRE-${randomUUID()}` : null;
+    const feeCents = feeEnabled ? Math.round(feePerAdultUsd * 100 * adults) : null;
+    // Manual transfers get a short code the applicant can put in the bank narration.
+    const paymentReference = !feeEnabled
+      ? null
+      : manualPayment
+        ? `MRE-${randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()}`
+        : `MRE-${randomUUID()}`;
     let applicationId = '';
     const client = await pool.connect();
     try {
@@ -349,7 +396,7 @@ function registerApi(pool: Pool, auth: AppAuth) {
     }
 
     let paymentUrl: string | null = null;
-    if (paymentReference && feeCents) {
+    if (paymentReference && feeCents && !manualPayment) {
       try {
         const response = await fetch('https://api.paystack.co/transaction/initialize', {
           method: 'POST',
@@ -373,7 +420,14 @@ function registerApi(pool: Pool, auth: AppAuth) {
         console.error('Paystack initialize request failed:', error);
       }
     }
-    res.status(201).json({ id: applicationId, payment_required: Boolean(paymentReference), payment_url: paymentUrl });
+    res.status(201).json({
+      id: applicationId,
+      payment_required: Boolean(paymentReference),
+      payment_url: paymentUrl,
+      manual_payment: manualPayment && paymentReference && feeCents
+        ? { ...manualPayment, reference: paymentReference, amount_cents: feeCents }
+        : null,
+    });
   });
 
   app.get('/api/admin/rental-applications', async (req, res) => {
@@ -382,7 +436,8 @@ function registerApi(pool: Pool, auth: AppAuth) {
       `SELECT a.id, a.applicant_name, a.phone, a.email, a.employment_status, a.monthly_gross_income,
         a.move_date, a.current_address, a.amenities, a.has_pets, a.first_time_renter,
         a.status, a.created_at, p.title AS property_title,
-        a.adults, a.fee_amount_cents, a.payment_status, a.payment_reference, a.paid_at
+        a.adults, a.fee_amount_cents, a.payment_status, a.payment_reference, a.paid_at,
+        a.payment_method, a.payment_claimed_at, a.payer_name
       FROM rental_applications a
       LEFT JOIN properties p ON p.id = a.property_id
       ORDER BY a.created_at DESC`,
@@ -397,6 +452,24 @@ function registerApi(pool: Pool, auth: AppAuth) {
     const { rowCount } = await query(
       'UPDATE rental_applications SET status = $1, updated_at = now() WHERE id = $2',
       [req.body.status, req.params.id],
+    );
+    if (!rowCount) return jsonError(res, 404, 'Application not found.');
+    res.json({ success: true });
+  });
+
+  // Admin confirms (or reverses) a payment after checking the bank account.
+  app.patch('/api/admin/rental-applications/:id/payment', async (req, res) => {
+    if (!await requireAdmin(req, res)) return;
+    const next = req.body?.payment_status;
+    if (next !== 'paid' && next !== 'unpaid') return jsonError(res, 400, 'Choose paid or unpaid.');
+    const { rowCount } = await query(
+      `UPDATE rental_applications
+       SET payment_status = $1::text,
+           paid_at = CASE WHEN $1::text = 'paid' THEN now() ELSE NULL END,
+           payment_claimed_at = CASE WHEN $1::text = 'paid' THEN payment_claimed_at ELSE NULL END,
+           updated_at = now()
+       WHERE id = $2 AND fee_amount_cents IS NOT NULL`,
+      [next, req.params.id],
     );
     if (!rowCount) return jsonError(res, 404, 'Application not found.');
     res.json({ success: true });

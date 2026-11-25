@@ -1,6 +1,16 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { ArrowRight, Check, Loader2, ShieldCheck } from 'lucide-react';
+import { ArrowRight, Check, Copy, Landmark, Loader2, ShieldCheck } from 'lucide-react';
 import { apiRequest } from '@/lib/api';
+
+type ManualPayment = {
+  id: string;
+  account_number: string;
+  account_name: string;
+  bank_name: string;
+  instructions: string;
+  reference: string;
+  amount_cents: number;
+};
 
 type ApplicationProperty = {
   id: string;
@@ -66,12 +76,17 @@ export default function RenterApplication({
   const [error, setError] = useState('');
   const [submitted, setSubmitted] = useState(false);
   const [paymentNotice, setPaymentNotice] = useState('');
-  const [fee, setFee] = useState<{ enabled: boolean; amount_per_adult: number } | null>(null);
+  const [fee, setFee] = useState<{ enabled: boolean; method: 'manual' | 'paystack' | null; amount_per_adult: number } | null>(null);
+  const [transfer, setTransfer] = useState<ManualPayment | null>(null);
+  const [payerName, setPayerName] = useState('');
+  const [claiming, setClaiming] = useState(false);
+  const [claimed, setClaimed] = useState(false);
+  const [copied, setCopied] = useState(false);
   const returnedPayment = new URLSearchParams(window.location.search).get('payment');
 
   useEffect(() => {
     let active = true;
-    void apiRequest<{ enabled: boolean; amount_per_adult: number }>('/application-fee')
+    void apiRequest<{ enabled: boolean; method: 'manual' | 'paystack' | null; amount_per_adult: number }>('/application-fee')
       .then((data) => { if (active) setFee(data); })
       .catch(() => { /* fee info is optional */ });
     return () => { active = false; };
@@ -94,7 +109,12 @@ export default function RenterApplication({
     setSending(true);
     setError('');
     try {
-      const result = await apiRequest<{ id: string; payment_required: boolean; payment_url: string | null }>('/rental-applications', {
+      const result = await apiRequest<{
+        id: string;
+        payment_required: boolean;
+        payment_url: string | null;
+        manual_payment: Omit<ManualPayment, 'id'> | null;
+      }>('/rental-applications', {
         method: 'POST',
         body: JSON.stringify({
           ...fields,
@@ -104,6 +124,11 @@ export default function RenterApplication({
           monthly_gross_income: fields.monthly_gross_income === '' ? null : Number(fields.monthly_gross_income),
         }),
       });
+      if (result.manual_payment) {
+        setTransfer({ ...result.manual_payment, id: result.id });
+        setFields({ ...initialFields, property_id: fields.property_id });
+        return;
+      }
       if (result.payment_url) {
         window.location.assign(result.payment_url);
         return;
@@ -120,6 +145,33 @@ export default function RenterApplication({
     }
   }
 
+  async function copyAccountNumber(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard unavailable; the number is shown on screen */
+    }
+  }
+
+  async function confirmTransfer() {
+    if (!transfer) return;
+    setClaiming(true);
+    setError('');
+    try {
+      await apiRequest(`/rental-applications/${transfer.id}/payment-claim`, {
+        method: 'POST',
+        body: JSON.stringify({ payment_reference: transfer.reference, payer_name: payerName }),
+      });
+      setClaimed(true);
+    } catch (claimError) {
+      setError(claimError instanceof Error ? claimError.message : 'We could not record your payment notice.');
+    } finally {
+      setClaiming(false);
+    }
+  }
+
   return (
     <section className="rental-application" id="renter-application">
       <div className="rental-application-heading">
@@ -127,7 +179,50 @@ export default function RenterApplication({
         <h2>Renter <span>application.</span></h2>
         <p>Tell us a little about your rental needs. An administrator will review your submission and follow up with you.</p>
       </div>
-      {returnedPayment === 'success' ? (
+      {transfer ? (
+        claimed ? (
+          <div className="application-success" role="status">
+            <Check size={24} />
+            <div>
+              <h3>Thank you. We have noted your payment.</h3>
+              <p>Our team will confirm the transfer of ${(transfer.amount_cents / 100).toFixed(2)} (reference {transfer.reference}) in our account and then follow up with you using the details you provided.</p>
+            </div>
+          </div>
+        ) : (
+          <div className="transfer-panel">
+            <div className="transfer-heading">
+              <Landmark size={24} />
+              <div>
+                <h3>Application received. One last step: pay the fee.</h3>
+                <p>Transfer exactly <strong>${(transfer.amount_cents / 100).toFixed(2)} USD</strong> to the account below, then tap “I have made the payment”.</p>
+              </div>
+            </div>
+            <dl className="transfer-details">
+              {transfer.bank_name && <div><dt>Bank</dt><dd>{transfer.bank_name}</dd></div>}
+              {transfer.account_name && <div><dt>Account name</dt><dd>{transfer.account_name}</dd></div>}
+              <div>
+                <dt>Account number</dt>
+                <dd className="transfer-account">
+                  {transfer.account_number}
+                  <button type="button" className="transfer-copy" onClick={() => void copyAccountNumber(transfer.account_number)} aria-label="Copy account number">
+                    {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? 'Copied' : 'Copy'}
+                  </button>
+                </dd>
+              </div>
+              <div><dt>Payment reference (put this in the transfer narration)</dt><dd>{transfer.reference}</dd></div>
+            </dl>
+            {transfer.instructions && <p className="transfer-note">{transfer.instructions}</p>}
+            <label className="transfer-payer">Name on the account you paid from (optional, helps us find your payment)
+              <input value={payerName} onChange={(event) => setPayerName(event.target.value)} maxLength={120} />
+            </label>
+            {error && <p className="application-error" role="alert">{error}</p>}
+            <button className="button button-dark application-submit" type="button" onClick={() => void confirmTransfer()} disabled={claiming}>
+              {claiming ? <><Loader2 size={17} className="chat-spin" /> Saving…</> : <>I have made the payment <ArrowRight size={17} /></>}
+            </button>
+            <p className="application-fee-note">Your application is only marked as paid after our team sees the money in our account.</p>
+          </div>
+        )
+      ) : returnedPayment === 'success' ? (
         <div className="application-success" role="status">
           <Check size={24} />
           <div>
@@ -242,7 +337,7 @@ export default function RenterApplication({
 
           <div className="application-privacy">
             <ShieldCheck size={19} />
-            <p>We use this information to respond to your rental enquiry. Do not include Social Security numbers, card details, passwords, or other sensitive financial information here. Any payment happens on Paystack’s secure page.</p>
+            <p>We use this information to respond to your rental enquiry. Do not include Social Security numbers, card details, passwords, or other sensitive financial information here. {fee?.method === 'manual' ? 'The application fee is paid by bank transfer after you submit.' : 'Any payment happens on Paystack’s secure page.'}</p>
           </div>
           <label className="application-consent">
             <input type="checkbox" checked={fields.privacy_consent} onChange={(event) => setFields({ ...fields, privacy_consent: event.target.checked })} required />
@@ -251,10 +346,12 @@ export default function RenterApplication({
           {returnedPayment === 'failed' && <p className="application-error" role="alert">We could not confirm your payment. If you were charged, contact us and quote your email address.</p>}
           {error && <p className="application-error" role="alert">{error}</p>}
           <button className="button button-dark application-submit" type="submit" disabled={sending}>
-            {sending ? <><Loader2 size={17} className="chat-spin" /> Submitting…</> : <>{feeTotal ? `Submit and pay $${feeTotal.toFixed(2)}` : 'Submit application'} <ArrowRight size={17} /></>}
+            {sending ? <><Loader2 size={17} className="chat-spin" /> Submitting…</> : <>{feeTotal ? (fee?.method === 'manual' ? `Submit and continue to payment ($${feeTotal.toFixed(2)})` : `Submit and pay $${feeTotal.toFixed(2)}`) : 'Submit application'} <ArrowRight size={17} /></>}
           </button>
           <p className="application-fee-note">
-            {fee?.enabled
+            {fee?.method === 'manual'
+              ? `Application fee: $${fee.amount_per_adult.toFixed(2)} USD per adult ($${feeTotal.toFixed(2)} for ${adultsCount}). After you submit, you will see our bank account details to pay by transfer. Your application is marked as paid once our team confirms the money has arrived.`
+              : fee?.enabled
               ? `Application fee: $${fee.amount_per_adult.toFixed(2)} USD per adult ($${feeTotal.toFixed(2)} for ${adultsCount}). You will pay by card on Paystack’s secure page right after you submit; this site never sees your card details. The fee is refundable on request: refunds are reviewed by our team and returned to the original payment method.`
               : 'No application fee is collected through this form.'}
           </p>

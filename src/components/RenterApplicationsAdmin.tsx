@@ -19,9 +19,18 @@ type RentalApplication = {
   property_title: string | null;
   adults: number;
   fee_amount_cents: number | null;
-  payment_status: 'unpaid' | 'paid';
+  payment_status: 'unpaid' | 'pending' | 'paid';
   payment_reference: string | null;
   paid_at: string | null;
+  payment_method: 'paystack' | 'manual' | null;
+  payment_claimed_at: string | null;
+  payer_name: string | null;
+};
+
+const paymentLabels: Record<RentalApplication['payment_status'], string> = {
+  unpaid: 'Unpaid',
+  pending: 'Says paid, needs checking',
+  paid: 'Paid',
 };
 
 function applicationDate(iso: string) {
@@ -53,6 +62,25 @@ export default function RenterApplicationsAdmin() {
       setApplications((current) => current.map((item) => item.id === application.id ? { ...item, status } : item));
     } catch (updateError) {
       setError(updateError instanceof Error ? updateError.message : 'Could not update the application status.');
+    }
+  }
+
+  async function updatePayment(application: RentalApplication, paymentStatus: 'paid' | 'unpaid') {
+    try {
+      await apiRequest(`/admin/rental-applications/${application.id}/payment`, {
+        method: 'PATCH',
+        body: JSON.stringify({ payment_status: paymentStatus }),
+      });
+      setApplications((current) => current.map((item) => item.id === application.id
+        ? {
+            ...item,
+            payment_status: paymentStatus,
+            paid_at: paymentStatus === 'paid' ? new Date().toISOString() : null,
+            payment_claimed_at: paymentStatus === 'paid' ? item.payment_claimed_at : null,
+          }
+        : item));
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : 'Could not update the payment status.');
     }
   }
 
@@ -90,7 +118,34 @@ export default function RenterApplicationsAdmin() {
             <div><dt>Monthly gross income</dt><dd>{application.monthly_gross_income === null ? 'Not provided' : Number(application.monthly_gross_income).toLocaleString('en-US', { style: 'currency', currency: 'USD' })}</dd></div>
             <div><dt>Move-in timing</dt><dd>{application.move_date}</dd></div>
             <div><dt>Adults</dt><dd>{application.adults}</dd></div>
-            <div><dt>Application fee</dt><dd>{application.fee_amount_cents === null ? 'Not requested' : `${(application.fee_amount_cents / 100).toLocaleString('en-US', { style: 'currency', currency: 'USD' })} — ${application.payment_status === 'paid' ? `Paid ${application.paid_at ? applicationDate(application.paid_at) : ''}` : 'Unpaid'}${application.payment_reference ? ` (${application.payment_reference})` : ''}`}</dd></div>
+            <div className="rental-admin-payment">
+              <dt>Application fee</dt>
+              <dd>
+                {application.fee_amount_cents === null ? 'Not requested' : (
+                  <>
+                    {(application.fee_amount_cents / 100).toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
+                    {' — '}
+                    <span className={`payment-badge payment-badge-${application.payment_status}`}>
+                      {paymentLabels[application.payment_status]}{application.payment_status === 'paid' && application.paid_at ? ` ${applicationDate(application.paid_at)}` : ''}
+                    </span>
+                    {application.payment_reference && <span className="payment-reference"> Reference: {application.payment_reference}</span>}
+                    {application.payment_status === 'pending' && application.payment_claimed_at && (
+                      <span className="payment-reference"> Applicant reported paying {applicationDate(application.payment_claimed_at)}{application.payer_name ? ` from account name “${application.payer_name}”` : ''}.</span>
+                    )}
+                    <span className="payment-actions">
+                      {application.payment_status !== 'paid' && (
+                        <button type="button" className="payment-confirm" onClick={() => void updatePayment(application, 'paid')}>Confirm payment received</button>
+                      )}
+                      {application.payment_status !== 'unpaid' && (
+                        <button type="button" className="payment-reject" onClick={() => void updatePayment(application, 'unpaid')}>
+                          {application.payment_status === 'paid' ? 'Mark as unpaid' : 'Not received'}
+                        </button>
+                      )}
+                    </span>
+                  </>
+                )}
+              </dd>
+            </div>
             <div><dt>Pets</dt><dd>{application.has_pets ? 'Yes' : 'No'}</dd></div>
             <div><dt>First rental application</dt><dd>{application.first_time_renter ? 'Yes' : 'No'}</dd></div>
             <div className="rental-admin-amenities"><dt>Interested amenities</dt><dd>{application.amenities.length ? application.amenities.join(', ') : 'None selected'}</dd></div>
