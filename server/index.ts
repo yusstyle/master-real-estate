@@ -35,7 +35,25 @@ const manualPayment = process.env.MANUAL_PAYMENT_ACCOUNT_NUMBER?.trim()
     }
   : null;
 const feeEnabled = Boolean(manualPayment || process.env.PAYSTACK_SECRET_KEY);
-const extraOrigins = (process.env.EXTRA_TRUSTED_ORIGINS ?? '').split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean);
+// Exact https origins only (scheme + host), e.g. https://www.mastersreal-estates.com. Invalid, non-https or non-bare-origin entries are dropped in production.
+function normalizeOrigin(value: string) {
+  try {
+    const trimmed = value.trim();
+    if (trimmed.includes('*')) return null; // wildcards are never trusted
+    const url = new URL(trimmed);
+    if (process.env.NODE_ENV === 'production' && url.protocol !== 'https:') return null;
+    // Reject anything that is not a bare origin (paths, queries, credentials) instead of silently widening it.
+    if ((url.pathname !== '/' && url.pathname !== '') || url.search || url.hash || url.username || url.password) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+const extraOrigins = (process.env.EXTRA_TRUSTED_ORIGINS ?? '')
+  .split(',')
+  .map(normalizeOrigin)
+  .filter((origin): origin is string => Boolean(origin));
+const trustedProductionOrigins = [...new Set([normalizeOrigin(appUrl), ...extraOrigins].filter((o): o is string => Boolean(o)))];
 
 function createAuth(pool: Pool, secret: string) {
   return betterAuth({
@@ -43,7 +61,7 @@ function createAuth(pool: Pool, secret: string) {
     baseURL: `${appUrl.replace(/\/$/, '')}/api/auth`,
     secret,
     trustedOrigins: process.env.NODE_ENV === 'production'
-      ? [appUrl, ...extraOrigins]
+      ? trustedProductionOrigins
       : [appUrl, 'http://localhost:5173', 'http://127.0.0.1:5173'],
     emailAndPassword: {
       enabled: true,
@@ -825,4 +843,7 @@ app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
 
 app.listen(port, () => {
   console.log(`API server listening on http://localhost:${port}`);
+  if (process.env.NODE_ENV === 'production') {
+    console.log(`Auth trusted origins: ${trustedProductionOrigins.join(', ') || '(none)'}`);
+  }
 });
